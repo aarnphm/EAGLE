@@ -1,11 +1,7 @@
 <img src="figs/logo.png" alt="EAGLE" width="220" align="left"><div align="center"><h1>&nbsp;EAGLE</h1></div>
 
 <p align="center">
-| <a href="https://arxiv.org/pdf/2401.15077.pdf"><b>Paper (EAGLE)</b></a> | 
-<a href="https://arxiv.org/pdf/2406.16858"><b>Paper (EAGLE-2)</b></a> |
-<a href="https://arxiv.org/pdf/2503.01840"><b>Paper (EAGLE-3)</b></a> |
-<a href="https://sites.google.com/view/
-eagle-llm"><b>Blog</b></a> |
+| <a href="https://arxiv.org/pdf/2401.15077.pdf"><b>Paper (EAGLE)</b></a> | <a href="https://arxiv.org/pdf/2406.16858"><b>Paper (EAGLE-2)</b></a> | <a href="https://arxiv.org/pdf/2503.01840"><b>Paper (EAGLE-3)</b></a> | <a href="https://sites.google.com/view/ eagle-llm"><b>Blog</b></a> |
 </p>
 
 
@@ -31,10 +27,10 @@ eagle-llm"><b>Blog</b></a> |
   <img src="./figs/eagle3r.jpg" alt="benchmark" width="790">
 </p>
 
-EAGLE (Extrapolation Algorithm for Greater Language-model Efficiency) is a new baseline for fast decoding of Large Language Models (LLMs) with provable performance maintenance. This approach involves extrapolating the second-top-layer contextual feature vectors of LLMs, enabling a significant boost in generation efficiency. 
+EAGLE (Extrapolation Algorithm for Greater Language-model Efficiency) is a new baseline for fast decoding of Large Language Models (LLMs) with provable performance maintenance. This approach involves extrapolating the second-top-layer contextual feature vectors of LLMs, enabling a significant boost in generation efficiency.
 
 - EAGLE is:
-	- certified by the <a href="https://github.com/hemingkx/Spec-Bench/blob/main/Leaderboard.md"><b>third-party</b></a> evaluation as the **fastest** speculative method so far. 
+	- certified by the <a href="https://github.com/hemingkx/Spec-Bench/blob/main/Leaderboard.md"><b>third-party</b></a> evaluation as the **fastest** speculative method so far.
 	- achieving **2x** speedup on <a href="https://github.com/pytorch-labs/gpt-fast"><b>gpt-fast</b></a>.
 	- **3x** faster than vanilla decoding (13B).
  	- **2x** faster than <a href="https://lmsys.org/blog/2023-11-21-lookahead-decoding/"><b>Lookahead</b></a> (13B).
@@ -49,7 +45,7 @@ EAGLE-2 uses the confidence scores from the draft model to approximate acceptanc
   - **4x** faster than vanilla decoding (13B).
   - **1.4x** faster than EAGLE-1 (13B).
 
-EAGLE-3 removes the feature prediction constraint in EAGLE and simulates this process during training using training-time testing. Considering that top-layer features are limited to next-token prediction, EAGLE-3 replaces them with a fusion of low-, mid-, and high-level semantic features. 
+EAGLE-3 removes the feature prediction constraint in EAGLE and simulates this process during training using training-time testing. Considering that top-layer features are limited to next-token prediction, EAGLE-3 replaces them with a fusion of low-, mid-, and high-level semantic features.
 EAGLE-3 further improves generation speed while ensuring lossless performance.
 
 - EAGLE-3 is:
@@ -135,7 +131,7 @@ pip install -r requirements.txt
 ```
 ## EAGLE-3 Weights
 
-| Base Model            | EAGLE-3 on Hugging Face                                                             | Base Model                   | EAGLE-3 on Hugging Face                                                             | 
+| Base Model            | EAGLE-3 on Hugging Face                                                             | Base Model                   | EAGLE-3 on Hugging Face                                                             |
 |-----------------------|-------------------------------------------------------------------------------------|------------------------------|-------------------------------------------------------------------------------------|
 | [lmsys/vicuna-13b-v1.3](https://huggingface.co/lmsys/vicuna-13b-v1.3)       | [yuhuili/EAGLE3-Vicuna1.3-13B](https://huggingface.co/yuhuili/EAGLE3-Vicuna1.3-13B) | [meta-llama/Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct)         | [yuhuili/EAGLE3-LLaMA3.1-Instruct-8B](https://huggingface.co/yuhuili/EAGLE3-LLaMA3.1-Instruct-8B) |
 | [meta-llama/Llama-3.3-70B-Instruct](https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct) | [yuhuili/EAGLE3-LLaMA3.3-Instruct-70B](https://huggingface.co/yuhuili/EAGLE3-LLaMA3.3-Instruct-70B) | [deepseek-ai/DeepSeek-R1-Distill-Llama-8B](https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-8B) | [yuhuili/EAGLE3-DeepSeek-R1-Distill-LLaMA-8B](https://huggingface.co/yuhuili/EAGLE3-DeepSeek-R1-Distill-LLaMA-8B) |
@@ -169,7 +165,7 @@ The inference code we provide automatically allocates model weights (loading a m
 ### With UI
 We have provided a suggested web interface, which you can use by running the following command. After the model is fully loaded, a URL will be output in the terminal, which you can enter into your browser to access.
 ```bash
-python -m eagle.application.webui --ea-model-path [path of EAGLE weight]\ 
+python -m eagle.application.webui --ea-model-path [path of EAGLE weight]\
 		--base-model-path [path of the original model]\
 		--model-type [vicuna\llama2\llama3]\
         --total-token [int]
@@ -242,26 +238,26 @@ A heartfelt thank you to all our contributors.
 ## Reference
 For technical details and full experimental results, please check [the paper of EAGLE](https://arxiv.org/pdf/2401.15077.pdf), [the paper of EAGLE-2](https://arxiv.org/pdf/2406.16858), and [the paper of EAGLE-3](https://arxiv.org/pdf/2503.01840).
 ```
-@inproceedings{li2024eagle, 
-	author = {Yuhui Li and Fangyun Wei and Chao Zhang and Hongyang Zhang}, 
-	title = {{EAGLE}: Speculative Sampling Requires Rethinking Feature Uncertainty}, 
+@inproceedings{li2024eagle,
+	author = {Yuhui Li and Fangyun Wei and Chao Zhang and Hongyang Zhang},
+	title = {{EAGLE}: Speculative Sampling Requires Rethinking Feature Uncertainty},
 	booktitle = {International Conference on Machine Learning},
 	year = {2024}
 }
-@inproceedings{li2024eagle2, 
-	author = {Yuhui Li and Fangyun Wei and Chao Zhang and Hongyang Zhang}, 
-	title = {{EAGLE-2}: Faster Inference of Language Models with Dynamic Draft Trees}, 
+@inproceedings{li2024eagle2,
+	author = {Yuhui Li and Fangyun Wei and Chao Zhang and Hongyang Zhang},
+	title = {{EAGLE-2}: Faster Inference of Language Models with Dynamic Draft Trees},
 	booktitle = {Empirical Methods in Natural Language Processing},
 	year = {2024}
 }
 @misc{li2025eagle3scalinginferenceacceleration,
-      title={{EAGLE-3}: Scaling up Inference Acceleration of Large Language Models via Training-Time Test}, 
+      title={{EAGLE-3}: Scaling up Inference Acceleration of Large Language Models via Training-Time Test},
       author={Yuhui Li and Fangyun Wei and Chao Zhang and Hongyang Zhang},
       year={2025},
       eprint={2503.01840},
       archivePrefix={arXiv},
       primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2503.01840}, 
+      url={https://arxiv.org/abs/2503.01840},
 }
 ```
 

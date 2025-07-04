@@ -1,0 +1,90 @@
+[build-system]
+requires = ['hatchling', "hatch-vcs>=0.3.0"]
+build-backend = 'hatchling.build'
+
+[project]
+name = "eagle-llm"
+version = "3.0.0"
+description = "Accelerating LLMs by 3x with No Quality Loss"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = [
+  "accelerate",
+  "openai",
+  "sentencepiece",
+  "vllm==0.9.1",
+  "torch==2.7.0",
+  "transformers==4.53.0",
+  "wandb>=0.21.0",
+  "deepspeed>=0.17.1",
+  "datasets>=3.6.0",
+  "tqdm>=4.67.1",
+]
+classifiers = [
+  'Development Status :: 3 - Alpha',
+  'Intended Audience :: Developers',
+  'License :: OSI Approved :: Apache Software License',
+  'Programming Language :: Python :: 3',
+  'Programming Language :: Python :: 3.9',
+  'Programming Language :: Python :: 3.10',
+  'Programming Language :: Python :: 3.11',
+]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+[tool.hatch.build.targets.sdist]
+only-include = ["eagle"]
+[tool.hatch.build.targets.wheel]
+packages = ["eagle"]
+
+[tool.ruff]
+extend-include = ["*.ipynb"]
+preview = true
+line-length = 119
+indent-width = 2
+
+[tool.ruff.format]
+preview = true
+quote-style = "single"
+indent-style = "space"
+skip-magic-trailing-comma = true
+docstring-code-format = true
+
+[tool.ruff.lint]
+ignore = ["RUF012", "ANN", "E722"]
+select = [
+  "F",
+  "G",
+  "PERF",
+  "RUF",
+  "W6",
+  "E71",
+  "E72",
+  "E112",
+  "E113",
+  "E203",
+  "E272",
+  "E502",
+  "E702",
+  "E703",
+  "E731",
+  "W191",
+  "W291",
+  "W293",
+  "UP039",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ty.src]
+respect-ignore-files = true
+root = "./"
+
+[tool.ty.environment]
+python = "./.venv"
+python-version = "3.11"
+
+[dependency-groups]
+dev = ["ipython>=9.4.0", "ruff>=0.12.2"]
