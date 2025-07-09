@@ -8,3 +8,5 @@ anthropic==0.5.0
 sentencepiece==0.1.99
 protobuf==3.19.0
 wandb
+datasets>=2.18.0
+tqdm>=4.66.2
