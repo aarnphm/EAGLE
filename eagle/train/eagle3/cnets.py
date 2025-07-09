@@ -29,7 +29,7 @@ from collections import Counter
 from transformers.activations import ACT2FN
 from transformers import AutoTokenizer
 from datasets import load_dataset
-from .modeling_llama_kv import LlamaForCausalLM
+from eagle.train.eagle3.modeling_llama_kv import LlamaForCausalLM
 
 
 # Copied from transformers.models.bart.modeling_bart._make_causal_mask

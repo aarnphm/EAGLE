@@ -6,8 +6,8 @@ import deepspeed, torch
 from transformers import AutoTokenizer
 from accelerate.utils import set_seed
 
-from cnets import Model
-from configs import EConfig
+from eagle.train.eagle3.cnets import Model
+from eagle.train.eagle3.configs import EConfig
 from datasets import load_dataset
 from typing import Any, Dict, List
 
