@@ -10,3 +10,4 @@ protobuf==3.19.0
 wandb
 datasets>=2.18.0
 tqdm>=4.66.2
+deepspeed>=0.14.1
