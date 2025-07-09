@@ -96,7 +96,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids):
 
 
 class LlamaRotaryEmbedding(torch.nn.Module):
-  def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
+  def __init__(self, dim, max_position_embeddings=131072, base=10000, device=None):
     super().__init__()
 
     self.dim = dim
@@ -509,7 +509,7 @@ class Model(nn.Module):
       dataset = dataset['train']
       # dataset = dataset.select(range(96))
       original_columns1 = dataset.column_names
-      num_proc = 48
+      num_proc = 32
 
       def preprocess_function(examples):
         new_examples = {
@@ -521,20 +521,36 @@ class Model(nn.Module):
           messages = [
             {
               'role': 'system',
-              'content': "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information.",
+              'content': "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe. Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information.",
             }
           ]
           convroles = ['user', 'assistant']
-          roles = {'human': 'user', 'gpt': 'assistant'}
+          roles = {
+            'human': 'user',
+            'user': 'user',
+            'assistant': 'assistant',
+            'chatgpt': 'assistant',
+            'gpt': 'assistant',
+            'system': 'system',
+          }
           source = examples['conversations'][i]
           if not source:
             continue
-          if roles[source[0]['from']] != 'user':
+          first = source[0]['from']
+          if first not in roles:
+            continue
+          if roles[first] == 'system':
+            messages = [{'role': 'system', 'content': source[0]['value']}]
+            source = source[1:]
+          elif roles[source[0]['from']] != 'user':
             # Skip the first one if it is not from human
             source = source[1:]
           for j, sentence in enumerate(source):
-            role = roles[sentence['from']]
-            assert role == convroles[j % 2], f'{i}'
+            role = roles.get(sentence['from'], '')
+            if not role:
+              continue
+            if role != convroles[j % 2]:
+              break
             # if sentence["from"]=="gpt":
             #     sentence["value"]=" "+sentence["value"]
             messages.append({'role': role, 'content': sentence['value']})
@@ -544,7 +560,7 @@ class Model(nn.Module):
             tokenizer.pad_token_id = tokenizer.unk_token_id
 
           input_ids = tokenizer(
-            conversation, return_tensors='pt', max_length=2048, add_special_tokens=False
+            conversation, return_tensors='pt', truncation=True, max_length=131072, add_special_tokens=False
           ).input_ids[0]
           loss_mask = torch.ones_like(input_ids)
           # print(i)
@@ -555,6 +571,8 @@ class Model(nn.Module):
 
           sep2 = '<|eot_id|><|start_header_id|>user<|end_header_id|>'
           turns = conversation.split(sep2)
+          if len(turns) < 2:
+            continue
 
           turns[1] = turns[0] + sep2 + turns[1]
           turns = turns[1:]

@@ -20,6 +20,8 @@ dependencies = [
   "deepspeed>=0.17.1",
   "datasets>=3.6.0",
   "tqdm>=4.67.1",
+  "safetensors>=0.5.3",
+  "mpi4py>=4.1.0",
 ]
 classifiers = [
   'Development Status :: 3 - Alpha',

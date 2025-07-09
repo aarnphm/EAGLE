@@ -28,7 +28,7 @@ from transformers.utils import (
   replace_return_docstrings,
 )
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
-from transformers import LlamaConfig
+from transformers import LlamaConfig, GenerationMixin
 
 logger = logging.get_logger(__name__)
 
@@ -1037,7 +1037,7 @@ class LlamaModel(LlamaPreTrainedModel):
     )
 
 
-class LlamaForCausalLM(LlamaPreTrainedModel):
+class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
   _tied_weights_keys = ['lm_head.weight']
 
   def __init__(self, config):
@@ -1215,7 +1215,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
     """,
   LLAMA_START_DOCSTRING,
 )
-class LlamaForSequenceClassification(LlamaPreTrainedModel):
+class LlamaForSequenceClassification(LlamaPreTrainedModel, GenerationMixin):
   def __init__(self, config):
     super().__init__(config)
     self.num_labels = config.num_labels

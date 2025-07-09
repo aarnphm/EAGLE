@@ -19,13 +19,12 @@ torch.backends.cuda.matmul.allow_tf32 = True
 set_seed(0)
 
 
-def build_dataset_rank(tokenizer, datapath):
+def build_dataset_rank(tokenizer, datapath, num_proc=32):
   ds = load_dataset('json', data_files=datapath)
   ds = ds['train']
   ds = ds.shuffle(seed=42)
   ds1 = ds
   original_columns1 = ds1.column_names
-  num_proc = 8
 
   def preprocess_function(examples):
     new_examples = {'attention_mask': [], 'input_ids': [], 'loss_mask': []}
@@ -37,16 +36,33 @@ def build_dataset_rank(tokenizer, datapath):
         }
       ]
       convroles = ['user', 'assistant']
-      roles = {'human': 'user', 'gpt': 'assistant'}
+      roles = {
+        'human': 'user',
+        'user': 'user',
+        'assistant': 'assistant',
+        'chatgpt': 'assistant',
+        'gpt': 'assistant',
+        'system': 'system',
+      }
       source = examples['conversations'][i]
       if not source:
         continue
-      if roles[source[0]['from']] != 'user':
+      first = source[0]['from']
+      if first not in roles:
+        continue
+      if roles[first] == 'system':
+        messages = [{'role': 'system', 'content': source[0]['value']}]
+        source = source[1:]
+      elif roles[source[0]['from']] != 'user':
         # Skip the first one if it is not from human
         source = source[1:]
       for j, sentence in enumerate(source):
-        role = roles[sentence['from']]
-        assert role == convroles[j % 2], f'{i}'
+        role = roles.get(sentence['from'], '')
+        if not role:
+          continue
+        if role != convroles[j % 2]:
+          break
+        # assert role == convroles[j % 2], f'{i}'
         # if sentence["from"]=="gpt":
         #     sentence["value"]=" "+sentence["value"]
         messages.append({'role': role, 'content': sentence['value']})
@@ -55,7 +71,9 @@ def build_dataset_rank(tokenizer, datapath):
       if not tokenizer.pad_token_id:
         tokenizer.pad_token_id = tokenizer.unk_token_id
 
-      input_ids = tokenizer(conversation, return_tensors='pt', max_length=2048, add_special_tokens=False).input_ids[0]
+      input_ids = tokenizer(
+        conversation, return_tensors='pt', truncation=True, max_length=131072, add_special_tokens=False
+      ).input_ids[0]
       loss_mask = torch.ones_like(input_ids)
       # print(i)
 
@@ -65,6 +83,8 @@ def build_dataset_rank(tokenizer, datapath):
 
       sep2 = '<|eot_id|><|start_header_id|>user<|end_header_id|>'
       turns = conversation.split(sep2)
+      if len(turns) < 2:
+        continue
 
       turns[1] = turns[0] + sep2 + turns[1]
       turns = turns[1:]
@@ -174,7 +194,7 @@ if __name__ == '__main__':
     'num_epochs': 40,
     'num_workers': 54,
     'max_len': 131072,
-    'config_path': 'config.json',
+    'config_path': os.path.join(os.path.dirname(__file__), 'config.json'),
   }
 
   tokenizer = AutoTokenizer.from_pretrained(args.basepath)
@@ -197,8 +217,7 @@ if __name__ == '__main__':
   if global_rank == 0:
     import wandb
 
-    wandb.login(key='')
-    wandb.init(project='eagle3-llama', entity='training', config=ds_config)
+    wandb.init(project='eagle3-llama', entity='hinterland', config=ds_config)
 
   os.makedirs(args.savedir, exist_ok=True)
 
