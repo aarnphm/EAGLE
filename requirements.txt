@@ -1,4 +1,4 @@
-torch==2.2.0
+torch==2.1.2
 numpy>=1.26.4
 typing_extensions>=4.11.0
 # Torch ecosystem helpers
@@ -24,6 +24,7 @@ wandb
 datasets>=2.18.0
 tqdm>=4.66.2
 safetensors>=0.4.3
-torchvision==0.17.0
-torchaudio==2.2.0
+torchvision==0.16.2
+torchaudio==2.1.2
 ninja>=1.11.1
+py-cpuinfo>=9.0.0
