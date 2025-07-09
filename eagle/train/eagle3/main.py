@@ -172,8 +172,8 @@ if __name__ == '__main__':
   train_config = {
     'bs': ds_config['train_micro_batch_size_per_gpu'],
     'num_epochs': 40,
-    'num_workers': 2,
-    'max_len': 2048,
+    'num_workers': 54,
+    'max_len': 131072,
     'config_path': 'config.json',
   }
 
@@ -198,7 +198,7 @@ if __name__ == '__main__':
     import wandb
 
     wandb.login(key='')
-    wandb.init(project='l382', entity='yuhui-li', config=ds_config)
+    wandb.init(project='eagle3-llama', entity='training', config=ds_config)
 
   os.makedirs(args.savedir, exist_ok=True)
 

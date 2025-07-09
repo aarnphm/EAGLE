@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from transformers.configuration_utils import PretrainedConfig
 
 
