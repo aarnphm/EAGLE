@@ -1,19 +1,30 @@
-torch==2.0.1+cu117    --extra-index-url https://download.pytorch.org/whl/cu117
+--extra-index-url https://download.pytorch.org/whl/cu117
+# -----------------------------------------------------------------------------
+# Core PyTorch (CUDA 11.7 / 11.8 wheels) and fundamental Python deps
+# -----------------------------------------------------------------------------
+torch==2.0.1+cu117
 numpy>=1.26.4
 typing_extensions>=4.11.0
 packaging>=23.1
-# Torch ecosystem
-torchvision==0.15.2+cu117    --extra-index-url https://download.pytorch.org/whl/cu117
-torchaudio==2.0.2+cu117      --extra-index-url https://download.pytorch.org/whl/cu117
-triton==2.0.0
 
-# Build helpers (must precede deepspeed compilation)
+# -----------------------------------------------------------------------------
+# Build-time helpers (must be present before DeepSpeed compiles its CUDA kernels)
+# -----------------------------------------------------------------------------
 ninja>=1.11.1
 psutil>=5.9.8
 py-cpuinfo>=9.0.0
-dill>=0.3.7
+dill>=0.3.7               # used by torch.utils.data multiprocessing
+triton==2.0.0             # required by Torch 2.0 fused kernels
 
-# Deep learning stack
+# -----------------------------------------------------------------------------
+# Torch ecosystem wheels (same CUDA tag)
+# -----------------------------------------------------------------------------
+torchvision==0.15.2+cu117
+torchaudio==2.0.2+cu117
+
+# -----------------------------------------------------------------------------
+# Deep-learning stack (versions validated against torch 2.0.x)
+# -----------------------------------------------------------------------------
 deepspeed==0.14.1
 transformers==4.40.2
 accelerate==0.24.1
@@ -22,7 +33,9 @@ lightning-utilities>=0.11.2
 torchmetrics>=1.3.0
 einops==0.7.0
 
+# -----------------------------------------------------------------------------
 # Data / model utilities
+# -----------------------------------------------------------------------------
 huggingface-hub>=0.23.0
 safetensors>=0.4.3
 datasets>=2.18.0
@@ -30,7 +43,9 @@ fsspec>=2024.5.0
 tqdm>=4.66.2
 pyyaml>=6.0.1
 
-# Application libraries
+# -----------------------------------------------------------------------------
+# Application-level libraries
+# -----------------------------------------------------------------------------
 fschat==0.2.31
 gradio==3.50.2
 openai==0.28.0
