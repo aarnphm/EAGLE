@@ -8,7 +8,7 @@ from accelerate.utils import set_seed
 
 from eagle.train.eagle3.cnets import Model
 from eagle.train.eagle3.configs import EConfig
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
 from typing import Any, Dict, List
 
 from torch import nn
@@ -17,6 +17,117 @@ from tqdm import tqdm
 
 torch.backends.cuda.matmul.allow_tf32 = True
 set_seed(0)
+
+
+def download_and_mix_datasets(cache_dir="./data_cache", train_split_ratio=0.95):
+    """Download UltraChat_200k and shareGPT datasets and mix them into a unified format"""
+    
+    print("Downloading and processing datasets...")
+    
+    # Download UltraChat_200k dataset
+    try:
+        ultrachat_ds = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_sft", cache_dir=cache_dir)
+        print(f"Loaded UltraChat_200k: {len(ultrachat_ds)} examples")
+    except Exception as e:
+        print(f"Failed to load UltraChat_200k: {e}")
+        ultrachat_ds = None
+    
+    # Download shareGPT dataset (using a reliable variant)
+    try:
+        sharegpt_ds = load_dataset("anon8231489123/ShareGPT_Vicuna_unfiltered", cache_dir=cache_dir)
+        if 'train' in sharegpt_ds:
+            sharegpt_ds = sharegpt_ds['train']
+        else:
+            # If no train split, use the first available split
+            sharegpt_ds = list(sharegpt_ds.values())[0]
+        print(f"Loaded shareGPT: {len(sharegpt_ds)} examples")
+    except Exception as e:
+        print(f"Failed to load shareGPT, trying alternative...")
+        try:
+            # Fallback to RyokoAI shareGPT dataset
+            sharegpt_ds = load_dataset("RyokoAI/ShareGPT52K", split="train", cache_dir=cache_dir)
+            print(f"Loaded alternative shareGPT: {len(sharegpt_ds)} examples")
+        except Exception as e2:
+            print(f"Failed to load alternative shareGPT: {e2}")
+            sharegpt_ds = None
+    
+    mixed_conversations = []
+    
+    # Process UltraChat_200k data
+    if ultrachat_ds:
+        print("Processing UltraChat_200k...")
+        for example in tqdm(ultrachat_ds, desc="Processing UltraChat"):
+            try:
+                # UltraChat format: {'messages': [{'role': 'user/assistant', 'content': '...'}]}
+                messages = example.get('messages', [])
+                if len(messages) >= 2:  # Need at least one exchange
+                    conversations = []
+                    for msg in messages:
+                        role = 'human' if msg['role'] == 'user' else 'gpt'
+                        conversations.append({
+                            'from': role,
+                            'value': msg['content']
+                        })
+                    
+                    mixed_conversations.append({
+                        'id': f"ultrachat_{len(mixed_conversations)}",
+                        'conversations': conversations
+                    })
+            except Exception as e:
+                continue
+    
+    # Process shareGPT data
+    if sharegpt_ds:
+        print("Processing shareGPT...")
+        for example in tqdm(sharegpt_ds, desc="Processing shareGPT"):
+            try:
+                # shareGPT can have different formats, try to handle them
+                if 'conversations' in example:
+                    # Format: {'conversations': [{'from': 'human/gpt', 'value': '...'}]}
+                    conversations = example['conversations']
+                elif 'data' in example:
+                    # Alternative format: {'data': [...]}
+                    conversations = []
+                    for item in example['data']:
+                        if isinstance(item, list) and len(item) == 2:
+                            role, content = item
+                            role = 'human' if role == 'human' else 'gpt'
+                            conversations.append({'from': role, 'value': content})
+                else:
+                    continue
+                
+                if len(conversations) >= 2:  # Need at least one exchange
+                    mixed_conversations.append({
+                        'id': f"sharegpt_{len(mixed_conversations)}",
+                        'conversations': conversations
+                    })
+            except Exception as e:
+                continue
+    
+    print(f"Total mixed conversations: {len(mixed_conversations)}")
+    
+    # Split into train and test
+    split_idx = int(len(mixed_conversations) * train_split_ratio)
+    train_data = mixed_conversations[:split_idx]
+    test_data = mixed_conversations[split_idx:]
+    
+    # Save mixed dataset locally
+    os.makedirs(cache_dir, exist_ok=True)
+    train_path = os.path.join(cache_dir, "mixed_train.jsonl")
+    test_path = os.path.join(cache_dir, "mixed_test.jsonl")
+    
+    with open(train_path, 'w', encoding='utf-8') as f:
+        for item in train_data:
+            f.write(json.dumps(item, ensure_ascii=False) + '\n')
+    
+    with open(test_path, 'w', encoding='utf-8') as f:
+        for item in test_data:
+            f.write(json.dumps(item, ensure_ascii=False) + '\n')
+    
+    print(f"Saved train dataset: {len(train_data)} examples -> {train_path}")
+    print(f"Saved test dataset: {len(test_data)} examples -> {test_path}")
+    
+    return train_path, test_path
 
 
 def build_dataset_rank(tokenizer, datapath):
@@ -155,16 +266,29 @@ def find_max_state_with_file(directory, filename='zero_to_fp32.py'):
 
 
 if __name__ == '__main__':
-  parser = argparse.ArgumentParser(description='sp')
-  parser.add_argument('--basepath', type=str, default='/home/lyh/weights/hf/llama31chat/8B/')
-  parser.add_argument(
-    '--trainpath', type=str, default='/home/lyh/code/nlp/developing/vllmbase/vllm/gedata/l318b.jsonl'
-  )
-  parser.add_argument('--testpath', type=str, default='/home/lyh/code/nlp/developing/vllmbase/vllm/gedata/0318.json')
-  parser.add_argument('--savedir', type=str, default='0')
+  parser = argparse.ArgumentParser(description='EAGLE-3 Training with Mixed Datasets')
+  parser.add_argument('--basepath', type=str, default='meta-llama/Llama-3.1-8B-Instruct',
+                     help='Path or model name for the base model (can be HuggingFace model name)')
+  parser.add_argument('--cache_dir', type=str, default='./data_cache',
+                     help='Directory to cache downloaded datasets')
+  parser.add_argument('--trainpath', type=str, default=None,
+                     help='Path to training data (will auto-generate if not provided)')
+  parser.add_argument('--testpath', type=str, default=None,
+                     help='Path to test data (will auto-generate if not provided)')
+  parser.add_argument('--savedir', type=str, default='./checkpoints',
+                     help='Directory to save model checkpoints')
   parser.add_argument('--local_rank', type=int, default=-1, help='local_rank for distributed training on gpus')
   parser = deepspeed.add_config_arguments(parser)
   args = parser.parse_args()
+
+  # Download and mix datasets if paths not provided
+  if args.trainpath is None or args.testpath is None:
+    print("Downloading and mixing UltraChat_200k and shareGPT datasets...")
+    train_path, test_path = download_and_mix_datasets(cache_dir=args.cache_dir)
+    if args.trainpath is None:
+      args.trainpath = train_path
+    if args.testpath is None:
+      args.testpath = test_path
 
   deepspeed_config = args.deepspeed_config
   with open(deepspeed_config) as f:
