@@ -1,7 +1,9 @@
 torch==2.2.0
 numpy>=1.26.4
+typing_extensions>=4.11.0
 transformers==4.40.2
 accelerate==0.29.2
+deepspeed>=0.14.1
 huggingface-hub>=0.23.0
 fschat==0.2.31
 gradio==3.50.2
@@ -12,5 +14,4 @@ protobuf==3.19.0
 wandb
 datasets>=2.18.0
 tqdm>=4.66.2
-deepspeed>=0.14.1
 safetensors>=0.4.3
