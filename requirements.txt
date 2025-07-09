@@ -15,6 +15,7 @@ psutil>=5.9.8
 py-cpuinfo>=9.0.0
 dill>=0.3.7               # used by torch.utils.data multiprocessing
 triton==2.0.0             # required by Torch 2.0 fused kernels
+pybind11>=2.11.1          # header library required for DeepSpeed C++ extensions
 
 # -----------------------------------------------------------------------------
 # Torch ecosystem wheels (same CUDA tag)
