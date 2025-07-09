@@ -646,30 +646,68 @@ class Model(nn.Module):
         )
         # dataset.set_format(type="torch")
 
+        import numpy as np
+        from tqdm import tqdm
+
         num_processes = num_proc
+
+        # Split the processed dataset into almost equal sized chunks so that
+        # every worker gets roughly the same amount of work.  ``len(dataset)``
+        # can be very large, therefore we compute the indices once and keep
+        # only lightweight references (slices) to the dataset.
         chunk_size = len(dataset) // num_processes + (len(dataset) % num_processes > 0)
         chunks = [dataset[i : i + chunk_size] for i in range(0, len(dataset), chunk_size)]
 
-        # 创建进程池
-        with multiprocessing.Pool(num_processes) as pool:
-          # 并行处理数据块
-          results = pool.map(process_data, chunks)
+        def process_chunk(ds_slice):  # local helper so it is picklable
+          """Count token occurrences in one dataset slice.
 
-        # 合并结果
-        token_dict = merge_dicts(results)
+          We convert the *input_ids* and *loss_mask* tensors to NumPy and then
+          use *np.bincount* which is highly optimized C-code.  This is several
+          orders of magnitude faster than the previous double ‑for-loop over
+          every token.
+          """
 
-        total_frequency = sum(token_dict.values())
-        top_N = token_dict.most_common(N)
-        top_N_frequency_sum = sum(freq for key, freq in top_N)
+          vocab_size = self.vocab_size
+          counts = np.zeros(vocab_size, dtype=np.int64)
+
+          # HuggingFace datasets allow column-wise access returning a list; we
+          # iterate pair-wise.
+          for ids, mask in zip(ds_slice["input_ids"], ds_slice["loss_mask"]):
+            ids_np = np.array(ids[0])
+            mask_np = np.array(mask[0], dtype=bool)
+            selected = ids_np[mask_np]
+            if selected.size:
+              counts[: selected.max() + 1] += np.bincount(selected, minlength=selected.max() + 1)
+
+          return counts
+
+        token_counts = np.zeros(self.vocab_size, dtype=np.int64)
+
+        # Use a process pool but iterate with ``imap`` so that we can update a
+        # tqdm progress-bar as soon as individual slices are finished.
+        with multiprocessing.Pool(num_processes) as pool, tqdm(total=len(chunks), desc="Counting tokens") as pbar:
+          for arr in pool.imap(process_chunk, chunks):
+            token_counts += arr
+            pbar.update()
+
+        # Identify the most frequent tokens.
+        total_frequency = token_counts.sum()
+        top_indices = np.argsort(-token_counts)[:N]
+        top_N_frequency_sum = token_counts[top_indices].sum()
+
         top_N_ratio = top_N_frequency_sum / total_frequency
-        print(f'top {N} token frequency ratio: {top_N_ratio:.2%}')
-        used_tokens = [key for key, freq in top_N]
-        used_tokens.sort()
+        print(f"top {N} token frequency ratio: {top_N_ratio:.2%}")
+
+        used_tokens = sorted(top_indices.tolist())
+
+        # Build mapping tensors.
         d2t = [used_tokens[i] - i for i in range(len(used_tokens))]
         t2d = [i in used_tokens for i in range(self.vocab_size)]
+
         d2t = torch.tensor(d2t)
         t2d = torch.tensor(t2d)
-        cache = {'d2t': d2t, 't2d': t2d}
+
+        cache = {"d2t": d2t, "t2d": t2d}
         torch.save(cache, cache_path)
       else:
         cache = torch.load(cache_path)
