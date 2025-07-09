@@ -156,12 +156,16 @@ def find_max_state_with_file(directory, filename='zero_to_fp32.py'):
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser(description='sp')
-  parser.add_argument('--basepath', type=str, default='/home/lyh/weights/hf/llama31chat/8B/')
+  parser.add_argument('--basepath', type=str, required=True, 
+                      help='Path to base model (e.g., meta-llama/Llama-3.1-8B-Instruct)')
   parser.add_argument(
-    '--trainpath', type=str, default='/home/lyh/code/nlp/developing/vllmbase/vllm/gedata/l318b.jsonl'
+    '--trainpath', type=str, default='./data/eagle3_mixed/mixed_dataset.jsonl',
+    help='Path to training dataset (default: ./data/eagle3_mixed/mixed_dataset.jsonl)'
   )
-  parser.add_argument('--testpath', type=str, default='/home/lyh/code/nlp/developing/vllmbase/vllm/gedata/0318.json')
-  parser.add_argument('--savedir', type=str, default='0')
+  parser.add_argument('--testpath', type=str, default='./data/eagle3_mixed/mixed_dataset_test.jsonl',
+                      help='Path to test dataset (default: ./data/eagle3_mixed/mixed_dataset_test.jsonl)')
+  parser.add_argument('--savedir', type=str, default='./checkpoints/eagle3',
+                      help='Directory to save checkpoints (default: ./checkpoints/eagle3)')
   parser.add_argument('--local_rank', type=int, default=-1, help='local_rank for distributed training on gpus')
   parser = deepspeed.add_config_arguments(parser)
   args = parser.parse_args()
