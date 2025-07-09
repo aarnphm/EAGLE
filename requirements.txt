@@ -1,10 +1,11 @@
-torch==2.0.1
+torch==2.0.1+cu117    --extra-index-url https://download.pytorch.org/whl/cu117
 numpy>=1.26.4
 typing_extensions>=4.11.0
 packaging>=23.1
 # Torch ecosystem
-torchvision==0.15.2
-torchaudio==2.0.2
+torchvision==0.15.2+cu117    --extra-index-url https://download.pytorch.org/whl/cu117
+torchaudio==2.0.2+cu117      --extra-index-url https://download.pytorch.org/whl/cu117
+triton==2.0.0
 
 # Build helpers (must precede deepspeed compilation)
 ninja>=1.11.1
