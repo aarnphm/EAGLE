@@ -611,12 +611,14 @@ class Model(nn.Module):
   def scandata(self, dataset, num_proc=8, cache_path="cache.pt"):
     N = self.draft_vocab_size
     if not os.path.exists(cache_path):
-      num_processes = num_proc
+      # Limit number of processes to prevent "Too many open files" error
+      max_processes = min(num_proc, 4, multiprocessing.cpu_count() // 2)
+      num_processes = max_processes
       chunk_size = len(dataset) // num_processes + (len(dataset) % num_processes > 0)
       chunks = [dataset[i : i + chunk_size] for i in range(0, len(dataset), chunk_size)]
 
-      # 创建进程池
-      with multiprocessing.Pool(num_processes) as pool:
+      # 创建进程池 with proper resource management
+      with multiprocessing.Pool(processes=num_processes, maxtasksperchild=1) as pool:
         # 并行处理数据块
         results = pool.map(process_data, chunks)
 
