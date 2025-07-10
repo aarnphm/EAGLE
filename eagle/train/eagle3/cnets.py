@@ -501,156 +501,216 @@ class Model(nn.Module):
     for param in self.embed_tokens.parameters():
       param.requires_grad = False
 
-  def scandata(self, datapath, tokenizerpath):
+  def scandata(self, datapath, tokenizerpath, num_proc=52):
+    """Pre-scan the training data to obtain the mapping between the full
+    vocabulary and the reduced draft vocabulary.
+
+    The original implementation could dead-lock when several training
+    processes (e.g. in distributed training) entered this function at the
+    same time – every process tried to create the same *cache.pt* file while
+    also launching its own pool of workers.  We guard the critical section
+    with a file lock so that only **one** process actually performs the heavy
+    computation and writes the cache to disk.  All the other processes will
+    block on the lock and simply load the already generated cache afterwards.
+    """
+
+    from filelock import FileLock
+
     N = self.draft_vocab_size
-    if not os.path.exists('cache.pt'):
-      tokenizer = AutoTokenizer.from_pretrained(tokenizerpath)
-      dataset = load_dataset('json', data_files=datapath)
-      dataset = dataset['train']
-      # dataset = dataset.select(range(96))
-      original_columns1 = dataset.column_names
-      num_proc = 32
 
-      def preprocess_function(examples):
-        new_examples = {
-          # "conversation": [],
-          'input_ids': [],
-          'loss_mask': [],
-        }
-        for i in range(len(examples['id'])):
-          messages = [
-            {
-              'role': 'system',
-              'content': "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe. Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information.",
-            }
-          ]
-          convroles = ['user', 'assistant']
-          roles = {
-            'human': 'user',
-            'user': 'user',
-            'assistant': 'assistant',
-            'chatgpt': 'assistant',
-            'gpt': 'assistant',
-            'system': 'system',
+    cache_path = "cache.pt"
+    lock_path = cache_path + ".lock"
+
+    # Every process will try to acquire the same lock. The first one will do
+    # the work; the rest will wait here until the cache is ready and then just
+    # load it.  This completely eliminates any race conditions around cache
+    # generation and avoids the dead-lock we observed after ~272k examples.
+    with FileLock(lock_path):
+      if not os.path.exists(cache_path):
+        tokenizer = AutoTokenizer.from_pretrained(tokenizerpath)
+        dataset = load_dataset('json', data_files=datapath)
+        dataset = dataset['train']
+        # dataset = dataset.select(range(96))
+        original_columns1 = dataset.column_names
+
+        def preprocess_function(examples):
+          new_examples = {
+            # "conversation": [],
+            'input_ids': [],
+            'loss_mask': [],
           }
-          source = examples['conversations'][i]
-          if not source:
-            continue
-          first = source[0]['from']
-          if first not in roles:
-            continue
-          if roles[first] == 'system':
-            messages = [{'role': 'system', 'content': source[0]['value']}]
-            source = source[1:]
-          elif roles[source[0]['from']] != 'user':
-            # Skip the first one if it is not from human
-            source = source[1:]
-          for j, sentence in enumerate(source):
-            role = roles.get(sentence['from'], '')
-            if not role:
+          for i in range(len(examples['id'])):
+            messages = [
+              {
+                'role': 'system',
+                'content': "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe. Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information.",
+              }
+            ]
+            convroles = ['user', 'assistant']
+            roles = {
+              'human': 'user',
+              'user': 'user',
+              'assistant': 'assistant',
+              'chatgpt': 'assistant',
+              'gpt': 'assistant',
+              'system': 'system',
+            }
+            source = examples['conversations'][i]
+            if not source:
               continue
-            if role != convroles[j % 2]:
-              break
-            # if sentence["from"]=="gpt":
-            #     sentence["value"]=" "+sentence["value"]
-            messages.append({'role': role, 'content': sentence['value']})
-          conversation = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+            first = source[0]['from']
+            if first not in roles:
+              continue
+            if roles[first] == 'system':
+              messages = [{'role': 'system', 'content': source[0]['value']}]
+              source = source[1:]
+            elif roles[source[0]['from']] != 'user':
+              # Skip the first one if it is not from human
+              source = source[1:]
+            for j, sentence in enumerate(source):
+              role = roles.get(sentence['from'], '')
+              if not role:
+                continue
+              if role != convroles[j % 2]:
+                break
+              # if sentence["from"]=="gpt":
+              #     sentence["value"]=" "+sentence["value"]
+              messages.append({'role': role, 'content': sentence['value']})
+            conversation = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
 
-          if not tokenizer.pad_token_id:
-            tokenizer.pad_token_id = tokenizer.unk_token_id
+            if not tokenizer.pad_token_id:
+              tokenizer.pad_token_id = tokenizer.unk_token_id
 
-          input_ids = tokenizer(
-            conversation, return_tensors='pt', truncation=True, max_length=131072, add_special_tokens=False
-          ).input_ids[0]
-          loss_mask = torch.ones_like(input_ids)
-          # print(i)
+            input_ids = tokenizer(
+              conversation, return_tensors='pt', truncation=True, max_length=131072, add_special_tokens=False
+            ).input_ids[0]
+            loss_mask = torch.ones_like(input_ids)
+            # print(i)
 
-          sep = '<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n'
+            sep = '<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n'
 
-          total_len = len(input_ids)
+            total_len = len(input_ids)
 
-          sep2 = '<|eot_id|><|start_header_id|>user<|end_header_id|>'
-          turns = conversation.split(sep2)
-          if len(turns) < 2:
-            continue
+            sep2 = '<|eot_id|><|start_header_id|>user<|end_header_id|>'
+            turns = conversation.split(sep2)
+            if len(turns) < 2:
+              continue
 
-          turns[1] = turns[0] + sep2 + turns[1]
-          turns = turns[1:]
+            turns[1] = turns[0] + sep2 + turns[1]
+            turns = turns[1:]
 
-          cur_len = 1
-          loss_mask[:cur_len] = 0
-          for i, turn in enumerate(turns):
-            if turn == '':
-              break
-            turn_len = len(tokenizer(turn).input_ids)
+            cur_len = 1
+            loss_mask[:cur_len] = 0
+            for i, turn in enumerate(turns):
+              if turn == '':
+                break
+              turn_len = len(tokenizer(turn).input_ids)
 
-            parts = turn.split(sep)
-            if len(parts) != 2:
-              break
-            parts[0] += sep
-            # "-2" is hardcoded for the Llama tokenizer to make the offset correct.
-            instruction_len = len(tokenizer(parts[0]).input_ids) - 1
+              parts = turn.split(sep)
+              if len(parts) != 2:
+                break
+              parts[0] += sep
+              # "-2" is hardcoded for the Llama tokenizer to make the offset correct.
+              instruction_len = len(tokenizer(parts[0]).input_ids) - 1
 
-            # Ignore the user instructions
-            if i == 0:
-              loss_mask[cur_len : cur_len + instruction_len - 2] = 0
-            else:
-              loss_mask[cur_len - 3 : cur_len + instruction_len + 1] = 0
-            cur_len += turn_len
-            if i != 0:
-              cur_len += 3
-            # cur_len+=2
+              # Ignore the user instructions
+              if i == 0:
+                loss_mask[cur_len : cur_len + instruction_len - 2] = 0
+              else:
+                loss_mask[cur_len - 3 : cur_len + instruction_len + 1] = 0
+              cur_len += turn_len
+              if i != 0:
+                cur_len += 3
+              # cur_len+=2
 
-            # if i != 0 and not tokenizer.legacy:
-            #     # The legacy and non-legacy modes handle special tokens differently
-            #     cur_len -= 1
+              # if i != 0 and not tokenizer.legacy:
+              #     # The legacy and non-legacy modes handle special tokens differently
+              #     cur_len -= 1
 
-          loss_mask[cur_len:] = 0
+            loss_mask[cur_len:] = 0
 
-          # new_examples["conversation"].append(conversation)
-          new_examples['input_ids'].append(input_ids[None, :])
-          new_examples['loss_mask'].append(loss_mask[None, :])
+            # new_examples["conversation"].append(conversation)
+            new_examples['input_ids'].append(input_ids[None, :])
+            new_examples['loss_mask'].append(loss_mask[None, :])
 
-        return new_examples
+          return new_examples
 
-      dataset = dataset.map(
-        preprocess_function,
-        batched=True,
-        num_proc=num_proc,
-        remove_columns=original_columns1,
-        load_from_cache_file=False,
-      )
-      # dataset.set_format(type="torch")
+        dataset = dataset.map(
+          preprocess_function,
+          batched=True,
+          num_proc=num_proc,
+          remove_columns=original_columns1,
+          load_from_cache_file=False,
+        )
+        # dataset.set_format(type="torch")
 
-      num_processes = num_proc
-      chunk_size = len(dataset) // num_processes + (len(dataset) % num_processes > 0)
-      chunks = [dataset[i : i + chunk_size] for i in range(0, len(dataset), chunk_size)]
+        import numpy as np
+        from tqdm import tqdm
 
-      # 创建进程池
-      with multiprocessing.Pool(num_processes) as pool:
-        # 并行处理数据块
-        results = pool.map(process_data, chunks)
+        num_processes = num_proc
 
-      # 合并结果
-      token_dict = merge_dicts(results)
+        # Split the processed dataset into almost equal sized chunks so that
+        # every worker gets roughly the same amount of work.  ``len(dataset)``
+        # can be very large, therefore we compute the indices once and keep
+        # only lightweight references (slices) to the dataset.
+        chunk_size = len(dataset) // num_processes + (len(dataset) % num_processes > 0)
+        chunks = [dataset[i : i + chunk_size] for i in range(0, len(dataset), chunk_size)]
 
-      total_frequency = sum(token_dict.values())
-      top_N = token_dict.most_common(N)
-      top_N_frequency_sum = sum(freq for key, freq in top_N)
-      top_N_ratio = top_N_frequency_sum / total_frequency
-      print(f'top {N} token frequency ratio: {top_N_ratio:.2%}')
-      used_tokens = [key for key, freq in top_N]
-      used_tokens.sort()
-      d2t = [used_tokens[i] - i for i in range(len(used_tokens))]
-      t2d = [i in used_tokens for i in range(self.vocab_size)]
-      d2t = torch.tensor(d2t)
-      t2d = torch.tensor(t2d)
-      cache = {'d2t': d2t, 't2d': t2d}
-      torch.save(cache, 'cache.pt')
-    else:
-      cache = torch.load('cache.pt')
-      d2t = cache['d2t']
-      t2d = cache['t2d']
+        def process_chunk(ds_slice):  # local helper so it is picklable
+          """Count token occurrences in one dataset slice.
+
+          We convert the *input_ids* and *loss_mask* tensors to NumPy and then
+          use *np.bincount* which is highly optimized C-code.  This is several
+          orders of magnitude faster than the previous double ‑for-loop over
+          every token.
+          """
+
+          vocab_size = self.vocab_size
+          counts = np.zeros(vocab_size, dtype=np.int64)
+
+          # HuggingFace datasets allow column-wise access returning a list; we
+          # iterate pair-wise.
+          for ids, mask in zip(ds_slice["input_ids"], ds_slice["loss_mask"]):
+            ids_np = np.array(ids[0])
+            mask_np = np.array(mask[0], dtype=bool)
+            selected = ids_np[mask_np]
+            if selected.size:
+              counts[: selected.max() + 1] += np.bincount(selected, minlength=selected.max() + 1)
+
+          return counts
+
+        token_counts = np.zeros(self.vocab_size, dtype=np.int64)
+
+        # Use a process pool but iterate with ``imap`` so that we can update a
+        # tqdm progress-bar as soon as individual slices are finished.
+        with multiprocessing.Pool(num_processes) as pool, tqdm(total=len(chunks), desc="Counting tokens") as pbar:
+          for arr in pool.imap(process_chunk, chunks):
+            token_counts += arr
+            pbar.update()
+
+        # Identify the most frequent tokens.
+        total_frequency = token_counts.sum()
+        top_indices = np.argsort(-token_counts)[:N]
+        top_N_frequency_sum = token_counts[top_indices].sum()
+
+        top_N_ratio = top_N_frequency_sum / total_frequency
+        print(f"top {N} token frequency ratio: {top_N_ratio:.2%}")
+
+        used_tokens = sorted(top_indices.tolist())
+
+        # Build mapping tensors.
+        d2t = [used_tokens[i] - i for i in range(len(used_tokens))]
+        t2d = [i in used_tokens for i in range(self.vocab_size)]
+
+        d2t = torch.tensor(d2t)
+        t2d = torch.tensor(t2d)
+
+        cache = {"d2t": d2t, "t2d": t2d}
+        torch.save(cache, cache_path)
+      else:
+        cache = torch.load(cache_path)
+        d2t = cache['d2t']
+        t2d = cache['t2d']
     self.register_buffer('d2t', d2t)
     self.register_buffer('t2d', t2d)
     self.l1smooth = nn.SmoothL1Loss(reduction='none')

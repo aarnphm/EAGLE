@@ -19,7 +19,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 set_seed(0)
 
 
-def build_dataset_rank(tokenizer, datapath, num_proc=32):
+def build_dataset_rank(tokenizer, datapath, num_proc=52):
   ds = load_dataset('json', data_files=datapath)
   ds = ds['train']
   ds = ds.shuffle(seed=42)
@@ -196,14 +196,15 @@ if __name__ == '__main__':
     'max_len': 131072,
     'config_path': os.path.join(os.path.dirname(__file__), 'config.json'),
   }
+  num_proc = 52
 
   tokenizer = AutoTokenizer.from_pretrained(args.basepath)
-  traindataset = build_dataset_rank(tokenizer, args.trainpath)
-  testdataset = build_dataset_rank(tokenizer, args.testpath)
+  traindataset = build_dataset_rank(tokenizer, args.trainpath, num_proc=num_proc)
+  testdataset = build_dataset_rank(tokenizer, args.testpath, num_proc=num_proc)
 
   config = EConfig.from_pretrained(train_config['config_path'])
   model = Model(config, path=args.basepath, load_emb=True, load_head=True)
-  model.scandata(args.trainpath, args.basepath)
+  model.scandata(args.trainpath, args.basepath, num_proc=num_proc)
 
   criterion = nn.SmoothL1Loss(reduction='none')
 
