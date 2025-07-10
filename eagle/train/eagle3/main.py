@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse, os, json, re
-import deepspeed, torch
+import deepspeed, torch, wandb
 
 from transformers import AutoTokenizer
 from accelerate.utils import set_seed
@@ -16,10 +16,12 @@ from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
 
 torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.benchmark = True
 set_seed(0)
 
 
-def build_dataset_rank(tokenizer, datapath, num_proc=52):
+def build_dataset_rank(tokenizer, datapath, max_length, num_proc=52):
   ds = load_dataset('json', data_files=datapath)
   ds = ds['train']
   ds = ds.shuffle(seed=42)
@@ -50,10 +52,7 @@ def build_dataset_rank(tokenizer, datapath, num_proc=52):
       first = source[0]['from']
       if first not in roles:
         continue
-      if roles[first] == 'system':
-        messages = [{'role': 'system', 'content': source[0]['value']}]
-        source = source[1:]
-      elif roles[source[0]['from']] != 'user':
+      if roles[source[0]['from']] != 'user':
         # Skip the first one if it is not from human
         source = source[1:]
       for j, sentence in enumerate(source):
@@ -68,14 +67,14 @@ def build_dataset_rank(tokenizer, datapath, num_proc=52):
         tokenizer.pad_token_id = tokenizer.unk_token_id
 
       input_ids = tokenizer(
-        conversation, return_tensors='pt', truncation=True, max_length=131072, add_special_tokens=False
+        conversation, return_tensors='pt', truncation=True, max_length=max_length, add_special_tokens=False
       ).input_ids[0]
       loss_mask = torch.ones_like(input_ids)
 
       sep = '<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n'
 
       total_len = len(input_ids)
-      if total_len > 131072:
+      if total_len > max_length:
         continue
 
       sep2 = '<|eot_id|><|start_header_id|>user<|end_header_id|>'
@@ -171,11 +170,9 @@ def find_max_state_with_file(directory, filename='zero_to_fp32.py'):
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser(description='sp')
-  parser.add_argument('--basepath', type=str, default='/home/lyh/weights/hf/llama31chat/8B/')
-  parser.add_argument(
-    '--trainpath', type=str, default='/home/lyh/code/nlp/developing/vllmbase/vllm/gedata/l318b.jsonl'
-  )
-  parser.add_argument('--testpath', type=str, default='/home/lyh/code/nlp/developing/vllmbase/vllm/gedata/0318.json')
+  parser.add_argument('--basepath', type=str)
+  parser.add_argument('--trainpath', type=str)
+  parser.add_argument('--testpath', type=str)
   parser.add_argument('--savedir', type=str, default='0')
   parser.add_argument('--local_rank', type=int, default=-1, help='local_rank for distributed training on gpus')
   parser = deepspeed.add_config_arguments(parser)
@@ -187,19 +184,22 @@ if __name__ == '__main__':
   train_config = {
     'bs': ds_config['train_micro_batch_size_per_gpu'],
     'num_epochs': 40,
-    'num_workers': 54,
-    'max_len': 131072,
+    'num_workers': 32,
+    'max_len': 32768,
     'config_path': os.path.join(os.path.dirname(__file__), 'config.json'),
   }
-  num_proc = 52
 
   tokenizer = AutoTokenizer.from_pretrained(args.basepath)
-  traindataset = build_dataset_rank(tokenizer, args.trainpath, num_proc=num_proc)
-  testdataset = build_dataset_rank(tokenizer, args.testpath, num_proc=num_proc)
+  traindataset = build_dataset_rank(
+    tokenizer, args.trainpath, max_length=train_config['max_len'], num_proc=train_config['num_workers']
+  )
+  testdataset = build_dataset_rank(
+    tokenizer, args.testpath, max_length=train_config['max_len'], num_proc=train_config['num_workers']
+  )
 
   config = EConfig.from_pretrained(train_config['config_path'])
   model = Model(config, path=args.basepath, load_emb=True, load_head=True)
-  model.scandata(traindataset)
+  model.scandata(traindataset, num_proc=train_config['num_workers'])
 
   criterion = nn.SmoothL1Loss(reduction='none')
 
@@ -211,8 +211,6 @@ if __name__ == '__main__':
   rank = deepspeed.comm.get_local_rank()
   world_size = deepspeed.comm.get_world_size()
   if global_rank == 0:
-    import wandb
-
     wandb.init(project='eagle3-llama', entity='hinterland', config=ds_config)
 
   os.makedirs(args.savedir, exist_ok=True)
@@ -222,7 +220,7 @@ if __name__ == '__main__':
     testdataset,
     batch_size=train_config['bs'],
     sampler=sampler,
-    num_workers=4,
+    num_workers=8,
     pin_memory=True,
     collate_fn=DataCollatorWithPadding(),
   )
@@ -232,7 +230,7 @@ if __name__ == '__main__':
     traindataset,
     batch_size=train_config['bs'],
     sampler=train_sampler,
-    num_workers=4,
+    num_workers=8,
     pin_memory=True,
     collate_fn=DataCollatorWithPadding(),
   )
@@ -266,7 +264,7 @@ if __name__ == '__main__':
 
       model_engine.step()
 
-      if global_rank == 0:
+      if global_rank == 0 and batch_idx % 10 == 0:
         logdict = {'train/lr': optimizer.optimizer.param_groups[0]['lr']}
         for i in range(len(plosses)):
           logdict[f'train/ploss_{i}'] = plosses[i].item()

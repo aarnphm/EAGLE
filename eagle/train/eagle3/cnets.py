@@ -17,14 +17,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""PyTorch LLaMA model."""
 
 from __future__ import annotations
 
-import math, multiprocessing, json, os, time
+import math, json, os, time
 import torch, torch.nn as nn, torch.nn.functional as F, torch.utils.checkpoint, numpy as np
 
-from typing import Optional
+from typing import Optional, List, Tuple
 from safetensors import safe_open
 from collections import Counter
 from transformers.activations import ACT2FN
@@ -594,13 +593,13 @@ class Model(nn.Module):
         with safe_open(os.path.join(path, emb_path), framework='pt', device='cuda') as f:
           tensor_slice = f.get_slice('model.embed_tokens.weight')
           vocab_size, hidden_dim = tensor_slice.get_shape()
-          tensor = tensor_slice[:, :hidden_dim].float()
+          tensor = tensor_slice[:, :hidden_dim].half()
       except:
         with open(os.path.join(path, 'pytorch_model.bin.index.json'), 'r') as f:
           index_json = json.loads(f.read())
           emb_path = index_json['weight_map']['model.embed_tokens.weight']
         weights = torch.load(os.path.join(path, emb_path))
-        tensor = weights['model.embed_tokens.weight'].float()
+        tensor = weights['model.embed_tokens.weight'].half()
       self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx, _weight=tensor)
 
     self.lm_head = nn.Linear(config.hidden_size, config.draft_vocab_size, bias=False)
@@ -608,25 +607,50 @@ class Model(nn.Module):
     for param in self.embed_tokens.parameters():
       param.requires_grad = False
 
-  def scandata(self, dataset, num_proc=8, cache_path="cache.pt"):
+  def scandata(self, dataset, num_proc=8, cache_path='cache.pt'):
     N = self.draft_vocab_size
     if not os.path.exists(cache_path):
-      # Limit number of processes to prevent "Too many open files" error
-      max_processes = min(num_proc, 4, multiprocessing.cpu_count() // 2)
-      num_processes = max_processes
-      chunk_size = len(dataset) // num_processes + (len(dataset) % num_processes > 0)
-      chunks = [dataset[i : i + chunk_size] for i in range(0, len(dataset), chunk_size)]
+      # Single-process GPU counting to avoid file-descriptor explosion.
+      device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-      # 创建进程池 with proper resource management
-      with multiprocessing.Pool(processes=num_processes, maxtasksperchild=1) as pool:
-        # 并行处理数据块
-        results = pool.map(process_data, chunks)
+      def _fast_count(ds, vocab_size, dev, bucket_tokens=8192):
+        """Batch-wise GPU bincount to minimise kernel launches."""
 
-      # 合并结果
-      token_dict = merge_dicts(results)
+        counts = torch.zeros(vocab_size, dtype=torch.long, device=dev)
+        bucket = []
+        cur_tokens = 0
 
-      total_frequency = sum(token_dict.values())
-      top_N = token_dict.most_common(N)
+        for ids, mask in zip(ds['input_ids'], ds['loss_mask']):
+          ids_t = ids[0].to(dev)
+          mask_t = mask[0].to(dev).bool()
+          sel = ids_t[mask_t]
+
+          if sel.numel():
+            bucket.append(sel)
+            cur_tokens += sel.numel()
+
+          if cur_tokens >= bucket_tokens:
+            flat = torch.cat(bucket)
+            counts.index_add_(0, *flat.unique(return_counts=True))
+            bucket = []
+            cur_tokens = 0
+
+        # drain remaining
+        if bucket:
+          flat = torch.cat(bucket)
+          counts.index_add_(0, *flat.unique(return_counts=True))
+
+        return counts
+
+      token_counts = _fast_count(dataset, self.vocab_size, device)
+
+      token_dict = {
+        int(k): int(v)
+        for k, v in zip(torch.nonzero(token_counts, as_tuple=True)[0], token_counts[token_counts > 0].tolist())
+      }
+
+      total_frequency = sum(token_dict.values()) if token_dict else 1
+      top_N = sorted(token_dict.items(), key=lambda x: x[1], reverse=True)[:N]
       top_N_frequency_sum = sum(freq for key, freq in top_N)
       top_N_ratio = top_N_frequency_sum / total_frequency
       print(f'top {N} token frequency ratio: {top_N_ratio:.2%}')
@@ -788,7 +812,7 @@ class Model(nn.Module):
         target_mask = target_mask[..., None].int()
         position_mask = target_mask * loss_mask
         target_head = target_head[..., self.t2d]
-        target_head = target_head.float()
+        target_head = target_head.half()
         target_p = nn.Softmax(dim=2)(target_head)
         target_p = target_p.detach()
 
@@ -797,8 +821,14 @@ class Model(nn.Module):
       hidden_states_out = self.norm(hidden_states_out)
 
       logits = self.lm_head(hidden_states_out)
-      logits = logits.float()
+      logits = logits.half()
       out_logp = nn.LogSoftmax(dim=2)(logits)
+      # Match shapes in case draft vocab < selected subset
+      if out_logp.size(-1) != target_p.size(-1):
+        common = min(out_logp.size(-1), target_p.size(-1))
+        out_logp = out_logp[..., :common]
+        target_p = target_p[..., :common]
+
       plogp = target_p * out_logp
       loss = -torch.sum(position_mask * plogp, 2).mean()
       plosses.append(loss)

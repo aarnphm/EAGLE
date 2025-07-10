@@ -1,3 +1,7 @@
+---
+title: README
+---
+
 <img src="figs/logo.png" alt="EAGLE" width="220" align="left"><div align="center"><h1>&nbsp;EAGLE</h1></div>
 
 <p align="center">
@@ -59,8 +63,6 @@ EAGLE-3 further improves generation speed while ensuring lossless performance.
 _Inference is conducted on 2x RTX 3090 GPUs at fp16 precision using the Vicuna 13B model._
 
 
-[//]: # ()
-[//]: # ()
 [//]: # (Using EAGLE-2, the inference speed on 2 RTX 3060 GPUs can be faster than vanilla autoregressive decoding on an A100 GPU.)
 
 ## Support
