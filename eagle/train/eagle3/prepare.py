@@ -36,14 +36,66 @@ overwrite it unless ``--overwrite`` is passed.
 
 from __future__ import annotations
 
-import argparse
-import json
-import uuid
-from pathlib import Path
-import random
+import argparse, json, uuid, random
 
-from datasets import load_dataset
+from pathlib import Path
 from tqdm import tqdm
+from datasets import load_dataset
+
+# ---------------------------------------------------------------------------- #
+# Conversation utilities
+# ---------------------------------------------------------------------------- #
+
+
+def _enforce_turn_order(messages: list[dict]) -> list[dict]:
+  """Return a copy of *messages* conformed to `[system]? human gpt human gpt ...`.
+
+  Rules
+  -----
+  1. At most one leading *system* message is kept (if multiple provided,
+     only the first is retained; the rest are discarded).
+  2. After the optional *system*, turns must strictly alternate between
+     *human* and *gpt* – starting with *human*.
+  3. Any message breaking the pattern is skipped.
+  4. If the conversation ends with an unmatched *human* turn (i.e. no
+     following *gpt*), that final message is dropped so that every *human*
+     query has a corresponding assistant response.
+  """
+
+  if not messages:
+    return []
+
+  cleaned = []
+
+  # Handle (optional) initial system message(s)
+  itr = iter(messages)
+  first_msg = next(itr, None)
+  if first_msg and first_msg['from'] == 'system':
+    cleaned.append(first_msg)
+    # consume any extra leading system messages silently
+    for m in itr:
+      if m['from'] != 'system':
+        # rewind the iterator one step back via a list trick
+        remaining = [m] + list(itr)
+        itr = iter(remaining)
+        break
+
+  # Now enforce alternating human → gpt pattern
+  expect = 'human'
+  for msg in itr:
+    role = msg.get('from')
+    if role != expect:
+      continue  # skip messages out of order / unwanted roles
+    cleaned.append(msg)
+    expect = 'gpt' if expect == 'human' else 'human'
+
+  # Ensure conversation ends with assistant (gpt). If odd length after system
+  # removal, drop trailing human.
+  if cleaned and cleaned[-1]['from'] == 'human':
+    cleaned.pop()
+
+  return cleaned
+
 
 # ---------------------------------------------------------------------------- #
 # Conversion helpers
@@ -53,25 +105,44 @@ from tqdm import tqdm
 def _convert_ultrachat(example: dict) -> dict:
   """Convert a single UltraChat example into ShareGPT format."""
   messages = []
+  role_map = {'user': 'human', 'assistant': 'gpt', 'system': 'system'}
+
   for msg in example.get('messages', []):
-    role = msg.get('role')
-    if role == 'user':
-      from_ = 'human'
-    elif role == 'assistant':
-      from_ = 'gpt'
-    else:
-      # Skip system/other roles for consistency with ShareGPT style
+    mapped = role_map.get(msg.get('role'))
+    if mapped is None:
       continue
-    messages.append({'from': from_, 'value': msg.get('content', '')})
+    messages.append({'from': mapped, 'value': msg.get('content', '')})
+
+  messages = _enforce_turn_order(messages)
+  if len(messages) < 2:  # need at least one human–gpt pair
+    return {}
 
   return {'id': str(uuid.uuid4()), 'conversations': messages}
 
 
-def _convert_sharegpt(example: dict) -> dict:
-  """ShareGPT dataset is *already* in the desired format; just normalise."""
+def _convert_sharegpt(example) -> dict:
+  """Normalise ShareGPT roles to `human`, `gpt`, or `system` and drop others."""
+
+  role_map = {
+    'human': 'human',
+    'user': 'human',
+    'assistant': 'gpt',
+    'gpt': 'gpt',
+    'chatgpt': 'gpt',
+    'system': 'system',
+  }
+
   conversations = []
   for c in example['conversations']:
-    conversations.append({'from': c['from'], 'value': c['value']})
+    mapped = role_map.get(c.get('from'))
+    if mapped is None:
+      continue
+    conversations.append({'from': mapped, 'value': c['value']})
+
+  conversations = _enforce_turn_order(conversations)
+  if len(conversations) < 2:
+    return {}
+
   return {'id': example.get('id', str(uuid.uuid4())), 'conversations': conversations}
 
 
@@ -130,9 +201,9 @@ def build_dataset(
     else:
       fout_train.write(json.dumps(rec, ensure_ascii=False) + '\n')
 
-  for ex in tqdm(ultra_ds, desc='UltraChat 200k training'):
+  for ex in tqdm(ultra_ds, desc='UltraChat 200k [train]'):
     fout_train.write(json.dumps(_convert_ultrachat(ex), ensure_ascii=False) + '\n')
-  for ext in tqdm(ultra_test, desc='UltraChat 200k test'):
+  for ext in tqdm(ultra_test, desc='UltraChat 200k [test]'):
     fout_test.write(json.dumps(_convert_ultrachat(ext), ensure_ascii=False) + '\n')
 
   for ex in tqdm(share_ds, desc='ShareGPT'):

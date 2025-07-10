@@ -21,14 +21,13 @@
 
 from __future__ import annotations
 
-import math, os, multiprocessing
-import torch, torch.nn as nn, torch.nn.functional as F, torch.utils.checkpoint
+import math, multiprocessing, json, os, time
+import torch, torch.nn as nn, torch.nn.functional as F, torch.utils.checkpoint, numpy as np
 
-from typing import List, Optional, Tuple
+from typing import Optional
+from safetensors import safe_open
 from collections import Counter
 from transformers.activations import ACT2FN
-from transformers import AutoTokenizer
-from datasets import load_dataset
 from eagle.train.eagle3.modeling_llama_kv import LlamaForCausalLM
 
 
@@ -453,11 +452,123 @@ def merge_dicts(dicts):
   return result
 
 
+def process_chunk_gpu(ds_slice, device, vocab_size):
+  """Count token occurrences in one dataset slice using GPU.
+
+  Uses PyTorch operations on GPU for efficient token counting,
+  avoiding CPU-GPU memory transfers and leveraging parallel processing.
+  Includes memory management to prevent OOM errors.
+  """
+  device = torch.device(f'cuda:{device}' if isinstance(device, int) else device)
+
+  # Set device context once
+  torch.cuda.set_device(device)
+  counts = torch.zeros(vocab_size, dtype=torch.long, device=device)
+
+  # Process in smaller batches to manage GPU memory
+  batch_size = 16  # Reduced batch size for stability
+  sequences = list(zip(ds_slice['input_ids'], ds_slice['loss_mask']))
+
+  # Add timeout mechanism
+  start_time = time.time()
+  timeout = 300  # 5 minutes timeout
+
+  try:
+    for i in range(0, len(sequences), batch_size):
+      # Check for timeout
+      if time.time() - start_time > timeout:
+        print(f'GPU processing timeout on device {device}')
+        break
+
+      batch_sequences = sequences[i : i + batch_size]
+
+      # Process batch on GPU without nested context managers
+      for ids, mask in batch_sequences:
+        try:
+          ids_tensor = torch.tensor(ids[0], device=device, dtype=torch.long)
+          mask_tensor = torch.tensor(mask[0], device=device, dtype=torch.bool)
+          selected = ids_tensor[mask_tensor]
+
+          if selected.numel() > 0:
+            # Use torch.bincount for GPU-accelerated counting
+            max_id = selected.max().item()
+            if max_id < vocab_size:
+              bincount = torch.bincount(selected, minlength=vocab_size)
+              counts += bincount
+            else:
+              # Handle case where token IDs exceed vocab_size
+              valid_mask = selected < vocab_size
+              if valid_mask.any():
+                valid_selected = selected[valid_mask]
+                bincount = torch.bincount(valid_selected, minlength=vocab_size)
+                counts += bincount
+
+          # Clean up tensors to free GPU memory
+          del ids_tensor, mask_tensor, selected
+        except Exception as e:
+          print(f'Error processing sequence on GPU {device}: {e}')
+          continue
+
+      # Clear GPU cache more frequently
+      if i % (batch_size * 5) == 0:
+        torch.cuda.empty_cache()
+
+  except torch.cuda.OutOfMemoryError as e:
+    print(f'GPU {device} out of memory: {e}')
+    torch.cuda.empty_cache()
+    # Fall back to CPU processing for this chunk
+    return process_chunk(ds_slice, vocab_size)
+  except Exception as e:
+    print(f'Unexpected error on GPU {device}: {e}')
+    torch.cuda.empty_cache()
+    return process_chunk(ds_slice, vocab_size)
+
+  # Final cleanup
+  torch.cuda.empty_cache()
+  return counts.cpu().numpy()
+
+
+def process_chunk(ds_slice, vocab_size):
+  counts = np.zeros(vocab_size, dtype=np.int64)
+
+  # HuggingFace datasets allow column-wise access returning a list; we
+  # iterate pair-wise.
+  try:
+    for ids, mask in zip(ds_slice['input_ids'], ds_slice['loss_mask']):
+      try:
+        ids_np = np.array(ids[0])
+        mask_np = np.array(mask[0], dtype=bool)
+        selected = ids_np[mask_np]
+        if selected.size and selected.max() < vocab_size:
+          counts[: selected.max() + 1] += np.bincount(selected, minlength=selected.max() + 1)
+      except Exception as e:
+        print(f'Error processing sequence: {e}')
+        continue
+  except Exception as e:
+    print(f'Error in process_chunk: {e}')
+
+  return counts
+
+
+def process_chunk_on_gpu(chunk_and_device):
+  """Wrapper function for multiprocessing GPU processing."""
+  chunk, device_id, vocab_size = chunk_and_device
+  try:
+    return process_chunk_gpu(chunk, device_id, vocab_size)
+  except Exception as e:
+    print(f'GPU processing failed on device {device_id}: {e}')
+    return process_chunk(chunk, vocab_size)
+
+
+def process_chunk_with_vocab_size(chunk_and_vocab_size):
+  """Wrapper function for multiprocessing CPU processing."""
+  chunk, vocab_size = chunk_and_vocab_size
+  return process_chunk(chunk, vocab_size)
+
+
 class Model(nn.Module):
   def __init__(self, config, load_head=False, load_emb=True, path=None):
     super().__init__()
-    # self.layers = nn.ModuleList(
-    #     [LlamaDecoderLayer(config, index=index) for index in range(config.num_hidden_layers)])
     self.midlayer = LlamaDecoderLayeremb(config)
     self.gradient_checkpointing = False
     self.padding_idx = config.pad_token_id
@@ -476,15 +587,11 @@ class Model(nn.Module):
       self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
 
     else:
-      from safetensors import safe_open
-      import json
-      import os
-
       try:
         with open(os.path.join(path, 'model.safetensors.index.json'), 'r') as f:
           index_json = json.loads(f.read())
           emb_path = index_json['weight_map']['model.embed_tokens.weight']
-        with safe_open(os.path.join(path, emb_path), framework='pt', device='cpu') as f:
+        with safe_open(os.path.join(path, emb_path), framework='pt', device='cuda') as f:
           tensor_slice = f.get_slice('model.embed_tokens.weight')
           vocab_size, hidden_dim = tensor_slice.get_shape()
           tensor = tensor_slice[:, :hidden_dim].float()
@@ -501,216 +608,38 @@ class Model(nn.Module):
     for param in self.embed_tokens.parameters():
       param.requires_grad = False
 
-  def scandata(self, datapath, tokenizerpath, num_proc=52):
-    """Pre-scan the training data to obtain the mapping between the full
-    vocabulary and the reduced draft vocabulary.
-
-    The original implementation could dead-lock when several training
-    processes (e.g. in distributed training) entered this function at the
-    same time – every process tried to create the same *cache.pt* file while
-    also launching its own pool of workers.  We guard the critical section
-    with a file lock so that only **one** process actually performs the heavy
-    computation and writes the cache to disk.  All the other processes will
-    block on the lock and simply load the already generated cache afterwards.
-    """
-
-    from filelock import FileLock
-
+  def scandata(self, dataset, num_proc=8, cache_path="cache.pt"):
     N = self.draft_vocab_size
+    if not os.path.exists(cache_path):
+      num_processes = num_proc
+      chunk_size = len(dataset) // num_processes + (len(dataset) % num_processes > 0)
+      chunks = [dataset[i : i + chunk_size] for i in range(0, len(dataset), chunk_size)]
 
-    cache_path = "cache.pt"
-    lock_path = cache_path + ".lock"
+      # 创建进程池
+      with multiprocessing.Pool(num_processes) as pool:
+        # 并行处理数据块
+        results = pool.map(process_data, chunks)
 
-    # Every process will try to acquire the same lock. The first one will do
-    # the work; the rest will wait here until the cache is ready and then just
-    # load it.  This completely eliminates any race conditions around cache
-    # generation and avoids the dead-lock we observed after ~272k examples.
-    with FileLock(lock_path):
-      if not os.path.exists(cache_path):
-        tokenizer = AutoTokenizer.from_pretrained(tokenizerpath)
-        dataset = load_dataset('json', data_files=datapath)
-        dataset = dataset['train']
-        # dataset = dataset.select(range(96))
-        original_columns1 = dataset.column_names
+      # 合并结果
+      token_dict = merge_dicts(results)
 
-        def preprocess_function(examples):
-          new_examples = {
-            # "conversation": [],
-            'input_ids': [],
-            'loss_mask': [],
-          }
-          for i in range(len(examples['id'])):
-            messages = [
-              {
-                'role': 'system',
-                'content': "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe. Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information.",
-              }
-            ]
-            convroles = ['user', 'assistant']
-            roles = {
-              'human': 'user',
-              'user': 'user',
-              'assistant': 'assistant',
-              'chatgpt': 'assistant',
-              'gpt': 'assistant',
-              'system': 'system',
-            }
-            source = examples['conversations'][i]
-            if not source:
-              continue
-            first = source[0]['from']
-            if first not in roles:
-              continue
-            if roles[first] == 'system':
-              messages = [{'role': 'system', 'content': source[0]['value']}]
-              source = source[1:]
-            elif roles[source[0]['from']] != 'user':
-              # Skip the first one if it is not from human
-              source = source[1:]
-            for j, sentence in enumerate(source):
-              role = roles.get(sentence['from'], '')
-              if not role:
-                continue
-              if role != convroles[j % 2]:
-                break
-              # if sentence["from"]=="gpt":
-              #     sentence["value"]=" "+sentence["value"]
-              messages.append({'role': role, 'content': sentence['value']})
-            conversation = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-
-            if not tokenizer.pad_token_id:
-              tokenizer.pad_token_id = tokenizer.unk_token_id
-
-            input_ids = tokenizer(
-              conversation, return_tensors='pt', truncation=True, max_length=131072, add_special_tokens=False
-            ).input_ids[0]
-            loss_mask = torch.ones_like(input_ids)
-            # print(i)
-
-            sep = '<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n'
-
-            total_len = len(input_ids)
-
-            sep2 = '<|eot_id|><|start_header_id|>user<|end_header_id|>'
-            turns = conversation.split(sep2)
-            if len(turns) < 2:
-              continue
-
-            turns[1] = turns[0] + sep2 + turns[1]
-            turns = turns[1:]
-
-            cur_len = 1
-            loss_mask[:cur_len] = 0
-            for i, turn in enumerate(turns):
-              if turn == '':
-                break
-              turn_len = len(tokenizer(turn).input_ids)
-
-              parts = turn.split(sep)
-              if len(parts) != 2:
-                break
-              parts[0] += sep
-              # "-2" is hardcoded for the Llama tokenizer to make the offset correct.
-              instruction_len = len(tokenizer(parts[0]).input_ids) - 1
-
-              # Ignore the user instructions
-              if i == 0:
-                loss_mask[cur_len : cur_len + instruction_len - 2] = 0
-              else:
-                loss_mask[cur_len - 3 : cur_len + instruction_len + 1] = 0
-              cur_len += turn_len
-              if i != 0:
-                cur_len += 3
-              # cur_len+=2
-
-              # if i != 0 and not tokenizer.legacy:
-              #     # The legacy and non-legacy modes handle special tokens differently
-              #     cur_len -= 1
-
-            loss_mask[cur_len:] = 0
-
-            # new_examples["conversation"].append(conversation)
-            new_examples['input_ids'].append(input_ids[None, :])
-            new_examples['loss_mask'].append(loss_mask[None, :])
-
-          return new_examples
-
-        dataset = dataset.map(
-          preprocess_function,
-          batched=True,
-          num_proc=num_proc,
-          remove_columns=original_columns1,
-          load_from_cache_file=False,
-        )
-        # dataset.set_format(type="torch")
-
-        import numpy as np
-        from tqdm import tqdm
-
-        num_processes = num_proc
-
-        # Split the processed dataset into almost equal sized chunks so that
-        # every worker gets roughly the same amount of work.  ``len(dataset)``
-        # can be very large, therefore we compute the indices once and keep
-        # only lightweight references (slices) to the dataset.
-        chunk_size = len(dataset) // num_processes + (len(dataset) % num_processes > 0)
-        chunks = [dataset[i : i + chunk_size] for i in range(0, len(dataset), chunk_size)]
-
-        def process_chunk(ds_slice):  # local helper so it is picklable
-          """Count token occurrences in one dataset slice.
-
-          We convert the *input_ids* and *loss_mask* tensors to NumPy and then
-          use *np.bincount* which is highly optimized C-code.  This is several
-          orders of magnitude faster than the previous double ‑for-loop over
-          every token.
-          """
-
-          vocab_size = self.vocab_size
-          counts = np.zeros(vocab_size, dtype=np.int64)
-
-          # HuggingFace datasets allow column-wise access returning a list; we
-          # iterate pair-wise.
-          for ids, mask in zip(ds_slice["input_ids"], ds_slice["loss_mask"]):
-            ids_np = np.array(ids[0])
-            mask_np = np.array(mask[0], dtype=bool)
-            selected = ids_np[mask_np]
-            if selected.size:
-              counts[: selected.max() + 1] += np.bincount(selected, minlength=selected.max() + 1)
-
-          return counts
-
-        token_counts = np.zeros(self.vocab_size, dtype=np.int64)
-
-        # Use a process pool but iterate with ``imap`` so that we can update a
-        # tqdm progress-bar as soon as individual slices are finished.
-        with multiprocessing.Pool(num_processes) as pool, tqdm(total=len(chunks), desc="Counting tokens") as pbar:
-          for arr in pool.imap(process_chunk, chunks):
-            token_counts += arr
-            pbar.update()
-
-        # Identify the most frequent tokens.
-        total_frequency = token_counts.sum()
-        top_indices = np.argsort(-token_counts)[:N]
-        top_N_frequency_sum = token_counts[top_indices].sum()
-
-        top_N_ratio = top_N_frequency_sum / total_frequency
-        print(f"top {N} token frequency ratio: {top_N_ratio:.2%}")
-
-        used_tokens = sorted(top_indices.tolist())
-
-        # Build mapping tensors.
-        d2t = [used_tokens[i] - i for i in range(len(used_tokens))]
-        t2d = [i in used_tokens for i in range(self.vocab_size)]
-
-        d2t = torch.tensor(d2t)
-        t2d = torch.tensor(t2d)
-
-        cache = {"d2t": d2t, "t2d": t2d}
-        torch.save(cache, cache_path)
-      else:
-        cache = torch.load(cache_path)
-        d2t = cache['d2t']
-        t2d = cache['t2d']
+      total_frequency = sum(token_dict.values())
+      top_N = token_dict.most_common(N)
+      top_N_frequency_sum = sum(freq for key, freq in top_N)
+      top_N_ratio = top_N_frequency_sum / total_frequency
+      print(f'top {N} token frequency ratio: {top_N_ratio:.2%}')
+      used_tokens = [key for key, freq in top_N]
+      used_tokens.sort()
+      d2t = [used_tokens[i] - i for i in range(len(used_tokens))]
+      t2d = [i in used_tokens for i in range(self.vocab_size)]
+      d2t = torch.tensor(d2t)
+      t2d = torch.tensor(t2d)
+      cache = {'d2t': d2t, 't2d': t2d}
+      torch.save(cache, cache_path)
+    else:
+      cache = torch.load(cache_path)
+      d2t = cache['d2t']
+      t2d = cache['t2d']
     self.register_buffer('d2t', d2t)
     self.register_buffer('t2d', t2d)
     self.l1smooth = nn.SmoothL1Loss(reduction='none')

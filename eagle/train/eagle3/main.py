@@ -60,11 +60,7 @@ def build_dataset_rank(tokenizer, datapath, num_proc=52):
         role = roles.get(sentence['from'], '')
         if not role:
           continue
-        if role != convroles[j % 2]:
-          break
-        # assert role == convroles[j % 2], f'{i}'
-        # if sentence["from"]=="gpt":
-        #     sentence["value"]=" "+sentence["value"]
+        assert role == convroles[j % 2], f'{i}'
         messages.append({'role': role, 'content': sentence['value']})
       conversation = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
 
@@ -75,16 +71,15 @@ def build_dataset_rank(tokenizer, datapath, num_proc=52):
         conversation, return_tensors='pt', truncation=True, max_length=131072, add_special_tokens=False
       ).input_ids[0]
       loss_mask = torch.ones_like(input_ids)
-      # print(i)
 
       sep = '<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n'
 
       total_len = len(input_ids)
+      if total_len > 131072:
+        continue
 
       sep2 = '<|eot_id|><|start_header_id|>user<|end_header_id|>'
       turns = conversation.split(sep2)
-      if len(turns) < 2:
-        continue
 
       turns[1] = turns[0] + sep2 + turns[1]
       turns = turns[1:]
@@ -204,7 +199,7 @@ if __name__ == '__main__':
 
   config = EConfig.from_pretrained(train_config['config_path'])
   model = Model(config, path=args.basepath, load_emb=True, load_head=True)
-  model.scandata(args.trainpath, args.basepath, num_proc=num_proc)
+  model.scandata(traindataset)
 
   criterion = nn.SmoothL1Loss(reduction='none')
 
