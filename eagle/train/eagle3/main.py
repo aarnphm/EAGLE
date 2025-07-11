@@ -202,7 +202,7 @@ if __name__ == '__main__':
 
   config = EConfig.from_pretrained(train_config['config_path'])
   model = Model(config, path=args.basepath, load_emb=True, load_head=True)
-  model.scandata(args.trainpath, args.basepath)
+  model.scandata(traindataset)
 
   criterion = nn.SmoothL1Loss(reduction='none')
 

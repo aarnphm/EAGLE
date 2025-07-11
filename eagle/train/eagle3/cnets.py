@@ -579,7 +579,9 @@ class Model(nn.Module):
   @torch.no_grad()
   def dataprepare(self, input_ids, attention_mask, loss_mask):
     device = input_ids.device
-    outs = self.target_model(input_ids=input_ids, attention_mask=attention_mask)
+    outs = self.target_model(
+      input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True, use_cache=True, inputs_embeds=True
+    )
     hidden_states0 = outs.hidden_states[0]
     hidden_states1 = outs.hidden_states[1]
     hidden_states2 = outs.hidden_states[2]
