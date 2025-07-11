@@ -174,6 +174,9 @@ if __name__ == '__main__':
   parser.add_argument('--trainpath', type=str)
   parser.add_argument('--testpath', type=str)
   parser.add_argument('--savedir', type=str, default='0')
+  parser.add_argument('--num_epochs', type=int, default=10)
+  parser.add_argument('--num_workers', type=int, default=32)
+  parser.add_argument('--max_len', type=int, default=8192)
   parser.add_argument('--local_rank', type=int, default=-1, help='local_rank for distributed training on gpus')
   parser = deepspeed.add_config_arguments(parser)
   args = parser.parse_args()
@@ -183,9 +186,9 @@ if __name__ == '__main__':
     ds_config = json.load(f)
   train_config = {
     'bs': ds_config['train_micro_batch_size_per_gpu'],
-    'num_epochs': 40,
-    'num_workers': 32,
-    'max_len': 32768,
+    'num_epochs': args.num_epochs,
+    'num_workers': args.num_workers,
+    'max_len': args.max_len,
     'config_path': os.path.join(os.path.dirname(__file__), 'config.json'),
   }
 
@@ -199,7 +202,7 @@ if __name__ == '__main__':
 
   config = EConfig.from_pretrained(train_config['config_path'])
   model = Model(config, path=args.basepath, load_emb=True, load_head=True)
-  model.scandata(traindataset, num_proc=train_config['num_workers'])
+  model.scandata(args.trainpath, args.basepath)
 
   criterion = nn.SmoothL1Loss(reduction='none')
 

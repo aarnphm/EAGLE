@@ -20,14 +20,14 @@
 
 from __future__ import annotations
 
-import math, json, os, time
-import torch, torch.nn as nn, torch.nn.functional as F, torch.utils.checkpoint, numpy as np
+import math, json, os
+import torch, torch.nn as nn, torch.nn.functional as F, torch.utils.checkpoint
 
 from typing import Optional, List, Tuple
 from safetensors import safe_open
 from collections import Counter
 from transformers.activations import ACT2FN
-from eagle.train.eagle3.modeling_llama_kv import LlamaForCausalLM
+from transformers import AutoModelForCausalLM
 
 
 # Copied from transformers.models.bart.modeling_bart._make_causal_mask
@@ -94,7 +94,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids):
 
 
 class LlamaRotaryEmbedding(torch.nn.Module):
-  def __init__(self, dim, max_position_embeddings=131072, base=10000, device=None):
+  def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
     super().__init__()
 
     self.dim = dim
@@ -346,7 +346,7 @@ class LlamaRMSNorm(nn.Module):
     return self.weight * hidden_states.to(input_dtype)
 
 
-class LlamaDecoderLayeremb(nn.Module):
+class LlamaDecoderLayerEmbedding(nn.Module):
   def __init__(self, config, last=True):
     super().__init__()
     self.hidden_size = config.hidden_size
@@ -451,124 +451,10 @@ def merge_dicts(dicts):
   return result
 
 
-def process_chunk_gpu(ds_slice, device, vocab_size):
-  """Count token occurrences in one dataset slice using GPU.
-
-  Uses PyTorch operations on GPU for efficient token counting,
-  avoiding CPU-GPU memory transfers and leveraging parallel processing.
-  Includes memory management to prevent OOM errors.
-  """
-  device = torch.device(f'cuda:{device}' if isinstance(device, int) else device)
-
-  # Set device context once
-  torch.cuda.set_device(device)
-  counts = torch.zeros(vocab_size, dtype=torch.long, device=device)
-
-  # Process in smaller batches to manage GPU memory
-  batch_size = 16  # Reduced batch size for stability
-  sequences = list(zip(ds_slice['input_ids'], ds_slice['loss_mask']))
-
-  # Add timeout mechanism
-  start_time = time.time()
-  timeout = 300  # 5 minutes timeout
-
-  try:
-    for i in range(0, len(sequences), batch_size):
-      # Check for timeout
-      if time.time() - start_time > timeout:
-        print(f'GPU processing timeout on device {device}')
-        break
-
-      batch_sequences = sequences[i : i + batch_size]
-
-      # Process batch on GPU without nested context managers
-      for ids, mask in batch_sequences:
-        try:
-          ids_tensor = torch.tensor(ids[0], device=device, dtype=torch.long)
-          mask_tensor = torch.tensor(mask[0], device=device, dtype=torch.bool)
-          selected = ids_tensor[mask_tensor]
-
-          if selected.numel() > 0:
-            # Use torch.bincount for GPU-accelerated counting
-            max_id = selected.max().item()
-            if max_id < vocab_size:
-              bincount = torch.bincount(selected, minlength=vocab_size)
-              counts += bincount
-            else:
-              # Handle case where token IDs exceed vocab_size
-              valid_mask = selected < vocab_size
-              if valid_mask.any():
-                valid_selected = selected[valid_mask]
-                bincount = torch.bincount(valid_selected, minlength=vocab_size)
-                counts += bincount
-
-          # Clean up tensors to free GPU memory
-          del ids_tensor, mask_tensor, selected
-        except Exception as e:
-          print(f'Error processing sequence on GPU {device}: {e}')
-          continue
-
-      # Clear GPU cache more frequently
-      if i % (batch_size * 5) == 0:
-        torch.cuda.empty_cache()
-
-  except torch.cuda.OutOfMemoryError as e:
-    print(f'GPU {device} out of memory: {e}')
-    torch.cuda.empty_cache()
-    # Fall back to CPU processing for this chunk
-    return process_chunk(ds_slice, vocab_size)
-  except Exception as e:
-    print(f'Unexpected error on GPU {device}: {e}')
-    torch.cuda.empty_cache()
-    return process_chunk(ds_slice, vocab_size)
-
-  # Final cleanup
-  torch.cuda.empty_cache()
-  return counts.cpu().numpy()
-
-
-def process_chunk(ds_slice, vocab_size):
-  counts = np.zeros(vocab_size, dtype=np.int64)
-
-  # HuggingFace datasets allow column-wise access returning a list; we
-  # iterate pair-wise.
-  try:
-    for ids, mask in zip(ds_slice['input_ids'], ds_slice['loss_mask']):
-      try:
-        ids_np = np.array(ids[0])
-        mask_np = np.array(mask[0], dtype=bool)
-        selected = ids_np[mask_np]
-        if selected.size and selected.max() < vocab_size:
-          counts[: selected.max() + 1] += np.bincount(selected, minlength=selected.max() + 1)
-      except Exception as e:
-        print(f'Error processing sequence: {e}')
-        continue
-  except Exception as e:
-    print(f'Error in process_chunk: {e}')
-
-  return counts
-
-
-def process_chunk_on_gpu(chunk_and_device):
-  """Wrapper function for multiprocessing GPU processing."""
-  chunk, device_id, vocab_size = chunk_and_device
-  try:
-    return process_chunk_gpu(chunk, device_id, vocab_size)
-  except Exception as e:
-    print(f'GPU processing failed on device {device_id}: {e}')
-    return process_chunk(chunk, vocab_size)
-
-
-def process_chunk_with_vocab_size(chunk_and_vocab_size):
-  """Wrapper function for multiprocessing CPU processing."""
-  chunk, vocab_size = chunk_and_vocab_size
-  return process_chunk(chunk, vocab_size)
-
-
 class Model(nn.Module):
   def __init__(self, config, load_head=False, load_emb=True, path=None):
     super().__init__()
-    self.midlayer = LlamaDecoderLayeremb(config)
+    self.midlayer = LlamaDecoderLayerEmbedding(config)
     self.gradient_checkpointing = False
     self.padding_idx = config.pad_token_id
     self.vocab_size = config.vocab_size
@@ -576,7 +462,7 @@ class Model(nn.Module):
     self.draft_vocab_size = config.draft_vocab_size
     self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
     self.length = 7
-    self.target_model = LlamaForCausalLM.from_pretrained(path, torch_dtype=torch.float16)
+    self.target_model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.bfloat16)
     self.target_model.eval()
     self.fc = nn.Linear(self.hidden_size * 3, self.hidden_size, bias=False)
     for param in self.target_model.parameters():
@@ -802,7 +688,7 @@ class Model(nn.Module):
 
       hidden_states_out = layer_outputs[0]
       # cache_hidden.append(layer_outputs[1])
-      # kv_cahce = layer_outputs[-1]
+      # kv_cache = layer_outputs[-1]
 
       with torch.no_grad():
         # hidden_states_target = padding(hidden_states, left=False)
@@ -824,10 +710,10 @@ class Model(nn.Module):
       logits = logits.half()
       out_logp = nn.LogSoftmax(dim=2)(logits)
       # Match shapes in case draft vocab < selected subset
-      if out_logp.size(-1) != target_p.size(-1):
-        common = min(out_logp.size(-1), target_p.size(-1))
-        out_logp = out_logp[..., :common]
-        target_p = target_p[..., :common]
+      # if out_logp.size(-1) != target_p.size(-1):
+      #   common = min(out_logp.size(-1), target_p.size(-1))
+      #   out_logp = out_logp[..., :common]
+      #   target_p = target_p[..., :common]
 
       plogp = target_p * out_logp
       loss = -torch.sum(position_mask * plogp, 2).mean()

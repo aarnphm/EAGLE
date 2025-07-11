@@ -12,7 +12,7 @@
   "hidden_size": 4096,
   "initializer_range": 0.02,
   "intermediate_size": 14336,
-  "max_position_embeddings": 32768,
+  "max_position_embeddings": 8192,
   "model_type": "llama",
   "num_attention_heads": 32,
   "num_key_value_heads": 8,
@@ -24,5 +24,5 @@
   "transformers_version": "4.53.1",
   "use_cache": true,
   "vocab_size": 128256,
-  "draft_vocab_size": 128256
+  "draft_vocab_size": 103559
 }
